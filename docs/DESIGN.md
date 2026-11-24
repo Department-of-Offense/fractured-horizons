@@ -2,6 +2,8 @@
 
 A living document. Change it through PRs like code.
 
+> **Current focus:** this repo is a systems lab (see the [README](../README.md)). The concept below is the north star the labs build toward: it decides which systems we need and what "good" feels like. The game itself is not being built out yet.
+
 ## Pitch
 
 Command a sci-fi strike force from orbit, then drop into any soldier, vehicle or craft and fight the battle yourself, without pausing the war around you.

@@ -1,0 +1,21 @@
+name: Canary (godot-systems main)
+
+# Runs every lab against the latest godot-systems main, before anything is
+# tagged. A red canary means a systems change would break this game: fix it
+# in godot-systems before releasing. GitHub emails whoever last edited this
+# schedule when a scheduled run fails.
+
+on:
+  schedule:
+    - cron: "0 7 * * *" # daily, 07:00 UTC
+  workflow_dispatch:
+    inputs:
+      systems_ref:
+        description: godot-systems branch or tag to test against
+        default: main
+
+jobs:
+  canary:
+    uses: ./.github/workflows/ci.yml
+    with:
+      systems_ref: ${{ inputs.systems_ref || 'main' }}
