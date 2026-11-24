@@ -1,3 +1,5 @@
+using Dof.Debug;
+using Dof.UnitDebug;
 using Godot;
 
 namespace FracturedHorizons.Labs;
@@ -31,8 +33,8 @@ public static class LabCatalog
 }
 
 /// <summary>
-/// Base for lab scenes: F1 returns to the menu, and an info panel says what
-/// the lab is testing. Labs use the systems the way a real game would, so
+/// Base for lab scenes: F1 returns to the menu, F3 opens the debug overlay,
+/// and an info panel says what the lab is testing. Labs use the systems the way a real game would, so
 /// keep lab code small. If a lab needs a lot of code, that code probably
 /// belongs in godot-systems.
 /// </summary>
@@ -43,6 +45,16 @@ public abstract partial class Lab : Node3D
     protected abstract string LabId { get; }
 
     private Label? _readout;
+
+    /// <summary>The F3 overlay every lab gets. Labs can add their own sections to it.</summary>
+    protected DebugOverlay Debug { get; } = new() { Name = "DebugOverlay" };
+
+    public override void _EnterTree()
+    {
+        if (Debug.GetParent() is not null) return;
+        Debug.AddSection(new UnitDebugSection());
+        AddChild(Debug);
+    }
 
     public override void _UnhandledInput(InputEvent @event)
     {
@@ -64,7 +76,7 @@ public abstract partial class Lab : Node3D
             GrowVertical = Control.GrowDirection.Begin,
             MouseFilter = Control.MouseFilterEnum.Ignore,
         };
-        var title = new Label { Text = $"{info?.Title ?? LabId}   [systems: {info?.Systems}]   F1 lab menu" };
+        var title = new Label { Text = $"{info?.Title ?? LabId}   [systems: {info?.Systems}]   F1 lab menu   F3 debug" };
         title.AddThemeColorOverride("font_color", new Color(1f, 0.85f, 0.4f));
         box.AddChild(title);
         box.AddChild(new Label { Text = controls, Modulate = new Color(1, 1, 1, 0.85f) });
