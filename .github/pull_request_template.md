@@ -8,4 +8,5 @@
 
 - [ ] Tests pass locally (`godot --headless --fixed-fps 60 --path . res://tests/TestRunner.tscn`)
 - [ ] New behaviour has a test, or the PR says why not
-- [ ] No edits inside `addons/command_engine` (that is vendored: change the engine repo, then run `tools/sync-engine.sh`)
+- [ ] No edits inside `addons/dof_*` (vendored: change godot-systems, then run `tools/sync-systems.sh`)
+- [ ] New or changed labs are in `LabCatalog` and covered in `tests/LabTests.cs`
