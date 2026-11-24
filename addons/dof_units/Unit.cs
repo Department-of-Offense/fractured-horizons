@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using Dof.Combat;
 using Dof.Core;
+using Dof.Navigation;
 using Godot;
 
 namespace Dof.Units;
@@ -12,14 +13,23 @@ namespace Dof.Units;
 /// through <see cref="Commands"/>). <see cref="BeginPilot"/> hands control to
 /// any other <see cref="IUnitController"/>; the order queue waits meanwhile.
 ///
-/// Author units as scenes: a Unit root with a CollisionShape3D, meshes, and
-/// optional <see cref="Health"/> and <see cref="Weapon"/> children.
+/// Make units from a <see cref="UnitDefinition"/> (<c>definition.Spawn(team)</c>),
+/// or author them as scenes: a Unit root with a CollisionShape3D, meshes, and
+/// optional <see cref="Health"/> and <see cref="Weapon"/> children. A scene
+/// unit can also point at a definition to take its stats and missing parts.
 /// </summary>
 [GlobalClass]
 public partial class Unit : CharacterBody3D, ICombatant
 {
     [Signal] public delegate void DiedEventHandler(Unit unit);
     [Signal] public delegate void PilotChangedEventHandler(bool piloted);
+
+    /// <summary>
+    /// The unit type this unit was made from. Its stats override the values
+    /// below, and it adds a collider, model, Health and Weapon if missing.
+    /// Applied once, when the unit is spawned or becomes ready.
+    /// </summary>
+    [Export] public UnitDefinition? Definition { get; set; }
 
     [Export] public string DisplayName { get; set; } = "Unit";
     [Export] public int Team { get; set; }
@@ -41,6 +51,33 @@ public partial class Unit : CharacterBody3D, ICombatant
     /// </summary>
     [Export(PropertyHint.Range, "0,2,0.05")] public float TargetScanInterval { get; set; } = 0.25f;
 
+    /// <summary>
+    /// Follow navmesh paths when moving under orders. Units walk straight
+    /// lines anyway when the world has no navmesh.
+    /// </summary>
+    [Export] public bool UseNavigation { get; set; } = true;
+
+    /// <summary>
+    /// A move order also finishes if the unit is this close (metres) and has
+    /// been blocked for <see cref="CrowdedSettleSeconds"/>, e.g. by squadmates
+    /// standing around the spot. 0 = always walk all the way.
+    /// </summary>
+    [Export] public float CrowdedArrivalRadius { get; set; } = 3f;
+
+    [Export] public float CrowdedSettleSeconds { get; set; } = 1f;
+
+    /// <summary>Steer around other units (RVO). See <see cref="Avoidance"/>.</summary>
+    [Export] public bool UseAvoidance { get; set; } = true;
+
+    /// <summary>Spread multiplier while walking (shooting on the move is less accurate).</summary>
+    [Export(PropertyHint.Range, "1,4,0.05")] public float MovingSpreadMultiplier { get; set; } = 1.5f;
+
+    /// <summary>
+    /// Spread multiplier for this unit's AI (not for a pilot): below 1 is a
+    /// sharpshooter, above 1 a poor shot. Use it for difficulty or veterancy.
+    /// </summary>
+    [Export(PropertyHint.Range, "0,4,0.05")] public float AiSpreadMultiplier { get; set; } = 1f;
+
     /// <summary>Drop queued orders when a pilot hands the unit back.</summary>
     [Export] public bool ClearOrdersOnRelease { get; set; }
 
@@ -48,12 +85,37 @@ public partial class Unit : CharacterBody3D, ICombatant
     public Weapon? Weapon { get; private set; }
     public CommandQueue Commands { get; } = new();
 
+    /// <summary>Path state for orders. Tune re-plan rate or navigation layers here.</summary>
+    public PathFollower Path { get; } = new();
+
+    /// <summary>
+    /// Local avoidance so units under orders steer around each other instead
+    /// of clumping. Piloted units ignore it but are still avoided by others.
+    /// Turn off with <see cref="UseAvoidance"/>.
+    /// </summary>
+    public AvoidanceAgent Avoidance { get; } = new();
+
     /// <summary>The controller used when no pilot is attached. Replace for custom AI.</summary>
     public IUnitController AiController { get; set; } = new OrderController();
     public IUnitController? Pilot { get; private set; }
     public IUnitController Controller => Pilot ?? AiController;
     public bool IsPiloted => Pilot is not null;
     public bool IsAlive => Health is not null && Health.IsAlive;
+
+    /// <summary>True while the driver is aiming down sights.</summary>
+    public bool IsAimingDownSights { get; private set; }
+
+    /// <summary>Spread multiplier the next shot would use (aiming, moving, AI skill).</summary>
+    public float SpreadMultiplier
+    {
+        get
+        {
+            var multiplier = IsPiloted ? 1f : AiSpreadMultiplier;
+            if (IsAimingDownSights && Weapon is not null) multiplier *= Weapon.AdsSpreadMultiplier;
+            if (Math3D.Flat(Velocity).LengthSquared() > 0.25f) multiplier *= MovingSpreadMultiplier;
+            return multiplier;
+        }
+    }
 
     /// <summary>Current aim pitch in radians, positive is up.</summary>
     public float AimPitch { get; private set; }
@@ -68,12 +130,39 @@ public partial class Unit : CharacterBody3D, ICombatant
     private double _scanTimer = GD.Randf() * 0.25;
     private readonly float _gravity = (float)ProjectSettings.GetSetting("physics/3d/default_gravity", 9.8f);
 
-    public override void _EnterTree() => UnitRegistry.Register(this);
+    public override void _EnterTree()
+    {
+        UnitRegistry.Register(this);
+        if (UseAvoidance && !_died) // Health isn't set up yet on first enter, so don't ask IsAlive
+        {
+            Avoidance.MaxSpeed = MoveSpeed;
+            Avoidance.Attach(GetWorld3D());
+        }
+    }
 
-    public override void _ExitTree() => UnitRegistry.Unregister(this);
+    public override void _ExitTree()
+    {
+        UnitRegistry.Unregister(this);
+        Avoidance.Detach();
+    }
+
+    /// <summary>
+    /// Apply <see cref="Definition"/> now (once). Spawn does this for you;
+    /// call it yourself if you need a scene unit's parts before it is ready.
+    /// </summary>
+    public void ApplyDefinition()
+    {
+        if (_definitionApplied || Definition is null) return;
+        _definitionApplied = true;
+        Definition.Configure(this);
+        Avoidance.ApplySettings();
+    }
+
+    private bool _definitionApplied;
 
     public override void _Ready()
     {
+        ApplyDefinition();
         AddToGroup(UnitRegistry.Group);
         Health = FindDirectChild<Health>() ?? AddNew(new Health { Name = "Health" });
         Health.Died += _ => HandleDeath();
@@ -172,11 +261,16 @@ public partial class Unit : CharacterBody3D, ICombatant
         RotationDegrees = new Vector3(0f, RotationDegrees.Y, 80f);
     }
 
+    private bool _died;
+
     private void HandleDeath()
     {
+        _died = true;
         Commands.Clear();
         RemoveFromGroup(UnitRegistry.Group);
         UnitRegistry.Unregister(this);
+        Avoidance.Detach();
+        Path.Reset();
         CollisionLayer = 0;
         CollisionMask = 0;
         OnDeath();
@@ -186,6 +280,14 @@ public partial class Unit : CharacterBody3D, ICombatant
     private void ApplyIntent(in UnitIntent intent, double delta)
     {
         var move = Math3D.Flat(intent.Move).LimitLength(1f) * MoveSpeed;
+        if (Avoidance.IsAttached)
+        {
+            // Agents ignore lower-priority agents. Moving units avoid each
+            // other and the pilot; standing units step aside for movers
+            // (a line of standing units would otherwise wall movers off).
+            Avoidance.Priority = Pilot is not null ? 1f : move.LengthSquared() > 0.0001f ? 0.6f : 0.3f;
+            move = Avoidance.Steer(GlobalPosition, move, obey: Pilot is null);
+        }
         var velocity = Velocity;
         velocity.X = move.X;
         velocity.Z = move.Z;
@@ -202,11 +304,14 @@ public partial class Unit : CharacterBody3D, ICombatant
 
         AimPitch = intent.AimPitch ?? Mathf.Lerp(AimPitch, 0f, Math3D.Damp(TurnSharpness, delta));
 
+        IsAimingDownSights = intent.AimDownSights;
+        if (intent.Reload) Weapon?.StartReload();
+
         if (intent.Fire && Weapon is not null)
         {
             var origin = EyePosition;
             var direction = intent.AimAt is { } target ? (target - origin).Normalized() : AimDirection;
-            Weapon.TryFire(this, Team, origin, direction);
+            Weapon.TryFire(this, Team, origin, direction, SpreadMultiplier);
         }
     }
 
